@@ -15,11 +15,17 @@ jobs:
         run: |
           unzip -q "جوجل ستوديو.zip" -d extracted
           echo "Extracted files:"
-          find extracted -maxdepth 3 -type f
+          find extracted -maxdepth 4 -type f
 
       - name: Find Android project
         run: |
           PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" \) -print -quit | xargs dirname)
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Android project not found!"
+            exit 1
+          fi
+
           echo "PROJECT_DIR=$PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
@@ -29,17 +35,41 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '9.3.1'
+      - name: Install Gradle 9.3.1
+        run: |
+          wget -q https://services.gradle.org/distributions/gradle-9.3.1-bin.zip
+          unzip -q gradle-9.3.1-bin.zip -d "$HOME/gradle"
+          echo "$HOME/gradle/gradle-9.3.1/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Gradle version
+        run: |
+          gradle --version
+
+      - name: Fix Gradle Wrapper
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          if [ -f gradle/wrapper/gradle-wrapper.properties ]; then
+            sed -i 's#gradle-[0-9.]*-bin.zip#gradle-9.3.1-bin.zip#g' gradle/wrapper/gradle-wrapper.properties
+            echo "Gradle wrapper updated:"
+            cat gradle/wrapper/gradle-wrapper.properties
+          else
+            echo "No Gradle wrapper found."
+          fi
 
       - name: Build APK
         working-directory: ${{ env.PROJECT_DIR }}
-        run: gradle assembleDebug
+        run: |
+          gradle --version
+          gradle assembleDebug --no-daemon
+
+      - name: Find APK
+        run: |
+          echo "Searching for APK..."
+          find extracted -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: extracted/**/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
