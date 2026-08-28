@@ -11,11 +11,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract Android project
+      - name: Extract project
         run: |
           unzip -q "جوجل ستوديو.zip" -d extracted
-          echo "Files extracted:"
-          find extracted -maxdepth 2 -type f
+          echo "Project files:"
+          find extracted -maxdepth 3 -type f
+
+      - name: Locate project
+        run: |
+          PROJECT_DIR=$(find extracted -name "settings.gradle.kts" -o -name "settings.gradle" | head -1 | xargs dirname)
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -29,15 +34,15 @@ jobs:
           gradle-version: '8.7'
 
       - name: Create Gradle Wrapper
-        working-directory: extracted
+        working-directory: ${{ env.PROJECT_DIR }}
         run: gradle wrapper --gradle-version 8.7
 
       - name: Build APK
-        working-directory: extracted
+        working-directory: ${{ env.PROJECT_DIR }}
         run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: extracted/app/build/outputs/apk/debug/*.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
