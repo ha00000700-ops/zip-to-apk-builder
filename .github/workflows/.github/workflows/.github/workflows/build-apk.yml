@@ -8,23 +8,27 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: تحميل المشروع
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: إعداد Node.js
-        uses: actions/setup-node@v4
+      - name: Extract project
+        run: |
+          unzip -q "جوجل ستوديو.zip" -d project
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          node-version: 20
-          cache: npm
+          distribution: temurin
+          java-version: '17'
 
-      - name: تثبيت الحزم
-        run: npm install
+      - name: Build APK
+        working-directory: project
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
 
-      - name: بناء المشروع
-        run: npm run build
-
-      - name: رفع ملفات البناء
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: web-build
-          path: dist/
+          name: APK
+          path: project/**/build/outputs/apk/debug/*.apk
