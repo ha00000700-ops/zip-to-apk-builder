@@ -46,13 +46,39 @@ jobs:
       - name: Create Gradle Wrapper
         run: |
           cd "$PROJECT_DIR"
-          gradle wrapper --gradle-version 9.3.1
+
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version 9.3.1
+          fi
+
           chmod +x gradlew
+
+      - name: Create debug keystore
+        run: |
+          cd "$PROJECT_DIR"
+
+          keytool -genkeypair \
+            -v \
+            -keystore debug.keystore \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          echo "✅ debug.keystore created"
 
       - name: Build Release APK
         run: |
           cd "$PROJECT_DIR"
           ./gradlew assembleRelease --stacktrace
+
+      - name: Find APK
+        run: |
+          echo "📦 APK files:"
+          find "$PROJECT_DIR" -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
