@@ -32,34 +32,23 @@ jobs:
 
           if [ -z "$PROJECT_DIR" ]; then
             echo "❌ لم يتم العثور على مشروع Android"
-            find extracted -maxdepth 4 -type f | head -100
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "✅ Android project found: $PROJECT_DIR"
-
-      - name: Check Gradle Wrapper
-        run: |
-          cd "$PROJECT_DIR"
-
-          if [ -f "gradlew" ]; then
-            echo "✅ gradlew موجود"
-            chmod +x gradlew
-          else
-            echo "⚠️ gradlew غير موجود، سيتم إنشاء Wrapper"
-            gradle wrapper --gradle-version 8.7
-            chmod +x gradlew
-          fi
+          echo "✅ Android project: $PROJECT_DIR"
 
       - name: Build Release APK
         run: |
           cd "$PROJECT_DIR"
-          ./gradlew assembleRelease --stacktrace
 
-      - name: Find APK
-        run: |
-          find "$PROJECT_DIR" -type f -name "*.apk" -print
+          if [ ! -f "gradlew" ]; then
+            echo "❌ gradlew غير موجود داخل المشروع"
+            exit 1
+          fi
+
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
