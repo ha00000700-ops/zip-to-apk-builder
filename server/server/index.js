@@ -10,6 +10,7 @@ const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
 const GITHUB_REPO = process.env.GITHUB_REPO || "zip-to-apk-builder";
 const GITHUB_WORKFLOW = process.env.GITHUB_WORKFLOW || "build.yml";
+const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
 
 const upload = multer({
   dest: "/tmp/uploads",
@@ -28,7 +29,15 @@ function githubHeaders() {
   };
 }
 
+/* -------------------------------- */
+/* Basic middleware                  */
+/* -------------------------------- */
+
 app.use(express.json());
+
+/* -------------------------------- */
+/* Health                            */
+/* -------------------------------- */
 
 app.get("/", (req, res) => {
   res.json({
@@ -45,6 +54,10 @@ app.get("/api/health", (req, res) => {
     status: "online"
   });
 });
+
+/* -------------------------------- */
+/* Start build                       */
+/* -------------------------------- */
 
 app.post("/api/build", upload.single("zip"), async (req, res) => {
   let filePath = null;
@@ -66,34 +79,44 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     const jobId = crypto.randomUUID();
 
-    jobs.set(jobId, {
+    const job = {
       jobId,
       status: "queued",
+      stage: 1,
+      stageName: "في انتظار البناء",
       createdAt: Date.now(),
       runId: null,
       apkUrl: null,
+      artifactUrl: null,
       error: null
-    });
+    };
 
-    // قراءة ZIP
+    jobs.set(jobId, job);
+
+    /* -------------------------------- */
+    /* Stage 2 - Upload project         */
+    /* -------------------------------- */
+
+    job.stage = 2;
+    job.stageName = "رفع المشروع";
+    job.status = "uploading";
+
     const zipBuffer = fs.readFileSync(filePath);
     const base64Zip = zipBuffer.toString("base64");
 
-    // اسم ZIP داخل GitHub
     const zipPath = "zipapk-build.zip";
 
     const contentsUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${zipPath}`;
 
-    // التحقق من وجود ZIP قديم
     let sha = null;
 
-    const existing = await fetch(contentsUrl, {
+    const existingResponse = await fetch(contentsUrl, {
       headers: githubHeaders()
     });
 
-    if (existing.ok) {
-      const existingData = await existing.json();
+    if (existingResponse.ok) {
+      const existingData = await existingResponse.json();
       sha = existingData.sha;
     }
 
@@ -106,7 +129,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       uploadBody.sha = sha;
     }
 
-    // رفع ZIP
     const uploadResponse = await fetch(contentsUrl, {
       method: "PUT",
       headers: {
@@ -116,22 +138,40 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       body: JSON.stringify(uploadBody)
     });
 
-    const uploadData = await uploadResponse.json();
+    const uploadText = await uploadResponse.text();
+
+    let uploadData = {};
+
+    try {
+      uploadData = JSON.parse(uploadText);
+    } catch {
+      uploadData = {};
+    }
 
     if (!uploadResponse.ok) {
-      jobs.delete(jobId);
+      job.status = "failed";
+      job.error =
+        uploadData.message ||
+        "GitHub ZIP upload failed";
 
       return res.status(uploadResponse.status).json({
-        error: "GitHub ZIP upload failed",
-        details: uploadData.message || "Unknown GitHub error"
+        error: job.error,
+        jobId
       });
     }
 
-    jobs.get(jobId).status = "starting";
+    /* -------------------------------- */
+    /* Stage 3 - Start GitHub workflow  */
+    /* -------------------------------- */
 
-    // تشغيل Workflow
+    job.stage = 3;
+    job.stageName = "تحضير Android";
+    job.status = "starting";
+
     const workflowUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`;
+
+    const dispatchTime = Date.now();
 
     const dispatchResponse = await fetch(workflowUrl, {
       method: "POST",
@@ -140,9 +180,421 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        ref: "main"
+        ref: GITHUB_BRANCH
       })
     });
 
     if (!dispatchResponse.ok) {
       const errorText = await dispatchResponse.text();
+
+      job.status = "failed";
+      job.error = "Failed to start GitHub Actions";
+
+      return res.status(dispatchResponse.status).json({
+        error: job.error,
+        details: errorText,
+        jobId
+      });
+    }
+
+    /* -------------------------------- */
+    /* Find the exact workflow run      */
+    /* -------------------------------- */
+
+    let run = null;
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        const runsUrl =
+          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${GITHUB_WORKFLOW}/runs` +
+          `?branch=${encodeURIComponent(GITHUB_BRANCH)}` +
+          `&event=workflow_dispatch&per_page=20`;
+
+        const runsResponse = await fetch(runsUrl, {
+          headers: githubHeaders()
+        });
+
+        if (runsResponse.ok) {
+          const runsData = await runsResponse.json();
+
+          const possibleRuns = (runsData.workflow_runs || [])
+            .filter(r => {
+              const created = new Date(r.created_at).getTime();
+
+              return (
+                created >= dispatchTime - 10000 &&
+                r.event === "workflow_dispatch"
+              );
+            })
+            .sort(
+              (a, b) =>
+                new Date(b.created_at).getTime() -
+                new Date(a.created_at).getTime()
+            );
+
+          if (possibleRuns.length > 0) {
+            run = possibleRuns[0];
+            break;
+          }
+        }
+      } catch (error) {
+        console.error("Run lookup error:", error.message);
+      }
+
+      await sleep(1500);
+    }
+
+    if (!run) {
+      job.status = "failed";
+      job.error = "GitHub workflow started but Run ID was not found";
+
+      return res.status(500).json({
+        error: job.error,
+        jobId
+      });
+    }
+
+    job.runId = run.id;
+
+    job.status = "building";
+    job.stage = 3;
+    job.stageName = "تحضير Android";
+
+    /* -------------------------------- */
+    /* Return immediately               */
+    /* -------------------------------- */
+
+    return res.status(202).json({
+      jobId: job.jobId,
+      runId: job.runId,
+      status: "building",
+      stage: job.stage,
+      stageName: job.stageName,
+      message: "Build started successfully"
+    });
+
+  } catch (error) {
+    console.error("BUILD ERROR:", error);
+
+    return res.status(500).json({
+      error: "Build server error",
+      details: error.message
+    });
+
+  } finally {
+    if (filePath) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (error) {
+        console.error(
+          "Temporary file cleanup error:",
+          error.message
+        );
+      }
+    }
+  }
+});
+
+/* -------------------------------- */
+/* Get build status                  */
+/* -------------------------------- */
+
+app.get("/api/build/:jobId", async (req, res) => {
+  try {
+    const job = jobs.get(req.params.jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        error: "Job not found",
+        jobId: req.params.jobId
+      });
+    }
+
+    if (!job.runId) {
+      return res.json({
+        jobId: job.jobId,
+        status: job.status,
+        stage: job.stage,
+        stageName: job.stageName,
+        runId: null,
+        apkUrl: null,
+        artifactUrl: null,
+        error: job.error
+      });
+    }
+
+    /* -------------------------------- */
+    /* Get GitHub Run                   */
+    /* -------------------------------- */
+
+    const runUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}`;
+
+    const runResponse = await fetch(runUrl, {
+      headers: githubHeaders()
+    });
+
+    if (!runResponse.ok) {
+      return res.json({
+        jobId: job.jobId,
+        status: job.status,
+        stage: job.stage,
+        stageName: job.stageName,
+        runId: job.runId,
+        apkUrl: job.apkUrl,
+        artifactUrl: job.artifactUrl,
+        error: job.error
+      });
+    }
+
+    const run = await runResponse.json();
+
+    /* -------------------------------- */
+    /* Workflow still running           */
+    /* -------------------------------- */
+
+    if (run.status !== "completed") {
+      job.status = "building";
+
+      /* -------------------------------- */
+      /* Read actual GitHub steps         */
+      /* -------------------------------- */
+
+      try {
+        const jobsUrl =
+          `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}/jobs?per_page=100`;
+
+        const jobsResponse = await fetch(jobsUrl, {
+          headers: githubHeaders()
+        });
+
+        if (jobsResponse.ok) {
+          const jobsData = await jobsResponse.json();
+
+          const githubJob =
+            (jobsData.jobs || [])[0];
+
+          if (githubJob) {
+            const steps = githubJob.steps || [];
+
+            const activeStep =
+              steps.find(
+                step =>
+                  step.status === "in_progress"
+              );
+
+            const completedSteps =
+              steps.filter(
+                step =>
+                  step.status === "completed" &&
+                  step.conclusion === "success"
+              );
+
+            if (activeStep) {
+              const name = activeStep.name.toLowerCase();
+
+              if (
+                name.includes("find zip") ||
+                name.includes("extract zip") ||
+                name.includes("upload")
+              ) {
+                job.stage = 2;
+                job.stageName = "رفع المشروع";
+              } else if (
+                name.includes("android project") ||
+                name.includes("gradle wrapper") ||
+                name.includes("signing")
+              ) {
+                job.stage = 3;
+                job.stageName = "تحضير Android";
+              } else if (
+                name.includes("setup gradle") ||
+                name.includes("build debug apk")
+              ) {
+                job.stage = 4;
+                job.stageName = "تشغيل Gradle";
+              }
+
+              if (
+                name.includes("build debug apk")
+              ) {
+                job.stage = 5;
+                job.stageName = "بناء APK";
+              }
+            } else if (completedSteps.length > 0) {
+              job.stage = Math.min(
+                5,
+                Math.max(3, completedSteps.length)
+              );
+            }
+          }
+        }
+      } catch (error) {
+        console.error(
+          "GitHub jobs lookup error:",
+          error.message
+        );
+      }
+
+      return res.json({
+        jobId: job.jobId,
+        status: job.status,
+        stage: job.stage,
+        stageName: job.stageName,
+        runId: job.runId,
+        apkUrl: null,
+        artifactUrl: null,
+        error: null
+      });
+    }
+
+    /* -------------------------------- */
+    /* Build failed                      */
+    /* -------------------------------- */
+
+    if (run.conclusion !== "success") {
+      job.status = "failed";
+      job.stage = 5;
+      job.stageName = "بناء APK";
+      job.error =
+        run.conclusion ||
+        "GitHub build failed";
+
+      return res.json({
+        jobId: job.jobId,
+        status: "failed",
+        stage: job.stage,
+        stageName: job.stageName,
+        runId: job.runId,
+        apkUrl: null,
+        artifactUrl: null,
+        error: job.error
+      });
+    }
+
+    /* -------------------------------- */
+    /* Build succeeded                   */
+    /* -------------------------------- */
+
+    job.status = "completed";
+    job.stage = 6;
+    job.stageName = "اكتمل";
+
+    /* -------------------------------- */
+    /* Find APK artifact                 */
+    /* -------------------------------- */
+
+    const artifactsUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}/artifacts`;
+
+    const artifactsResponse = await fetch(
+      artifactsUrl,
+      {
+        headers: githubHeaders()
+      }
+    );
+
+    if (artifactsResponse.ok) {
+      const artifactsData =
+        await artifactsResponse.json();
+
+      const artifact =
+        (artifactsData.artifacts || [])
+          .find(
+            a =>
+              a.name === "app-debug" &&
+              !a.expired
+          );
+
+      if (artifact) {
+        job.artifactUrl =
+          artifact.archive_download_url;
+      }
+    }
+
+    return res.json({
+      jobId: job.jobId,
+      status: "completed",
+      stage: 6,
+      stageName: "اكتمل",
+      runId: job.runId,
+      apkUrl: job.apkUrl,
+      artifactUrl: job.artifactUrl,
+      error: null
+    });
+
+  } catch (error) {
+    console.error(
+      "STATUS ERROR:",
+      error
+    );
+
+    return res.status(500).json({
+      error: "Failed to read build status",
+      details: error.message
+    });
+  }
+});
+
+/* -------------------------------- */
+/* Optional GitHub Run information   */
+/* -------------------------------- */
+
+app.get("/api/build/:jobId/run", async (req, res) => {
+  try {
+    const job = jobs.get(req.params.jobId);
+
+    if (!job) {
+      return res.status(404).json({
+        error: "Job not found"
+      });
+    }
+
+    if (!job.runId) {
+      return res.json({
+        runId: null
+      });
+    }
+
+    const runUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}`;
+
+    const response = await fetch(runUrl, {
+      headers: githubHeaders()
+    });
+
+    const data = await response.json();
+
+    return res.json({
+      runId: job.runId,
+      status: data.status,
+      conclusion: data.conclusion,
+      htmlUrl: data.html_url
+    });
+
+  } catch (error) {
+    return res.status(500).json({
+      error: error.message
+    });
+  }
+});
+
+/* -------------------------------- */
+/* Helper                            */
+/* -------------------------------- */
+
+function sleep(ms) {
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
+  );
+}
+
+/* -------------------------------- */
+/* Start server                      */
+/* -------------------------------- */
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(
+    `ZIPAPK Build Server running on port ${PORT}`
+  );
+});
