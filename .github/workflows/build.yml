@@ -47,7 +47,6 @@ jobs:
           unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
 
           echo "ZIP extracted successfully."
-          find extracted -maxdepth 4 -type f | sort | head -200
 
       - name: Find Android Project
         id: android_project
@@ -85,29 +84,48 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --version
 
+      - name: Create Debug Signing Key
+        working-directory: ${{ steps.android_project.outputs.project_dir }}
+        run: |
+          mkdir -p "$HOME/.android"
+
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair \
+              -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+          echo "Debug signing key ready."
+
       - name: Build Debug APK
         working-directory: ${{ steps.android_project.outputs.project_dir }}
         run: |
           ./gradlew assembleDebug --stacktrace
 
-      - name: Locate & Verify APK
+      - name: Locate APK
         id: apk_path
         run: |
           APK_FILE=$(find extracted -type f -path "*/build/outputs/apk/debug/*.apk" | head -n 1)
 
           if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
             echo "::error::No APK file was produced."
-            echo "Searching for APK files..."
             find extracted -type f -name "*.apk" -print
             exit 1
           fi
 
-          echo "Found real APK:"
+          echo "Found APK:"
           ls -lh "$APK_FILE"
 
           echo "apk_path=$APK_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Debug APK Artifact
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
