@@ -71,7 +71,8 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       status: "queued",
       createdAt: Date.now(),
       runId: null,
-      apkUrl: null
+      apkUrl: null,
+      error: null
     });
 
     // قراءة ZIP
@@ -84,7 +85,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     const contentsUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${zipPath}`;
 
-    // التحقق من وجود ZIP سابق
+    // التحقق من وجود ZIP قديم
     let sha = null;
 
     const existing = await fetch(contentsUrl, {
@@ -105,7 +106,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       uploadBody.sha = sha;
     }
 
-    // رفع ZIP إلى GitHub
+    // رفع ZIP
     const uploadResponse = await fetch(contentsUrl, {
       method: "PUT",
       headers: {
@@ -126,9 +127,9 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       });
     }
 
-    jobs.get(jobId).status = "building";
+    jobs.get(jobId).status = "starting";
 
-    // تشغيل GitHub Actions
+    // تشغيل Workflow
     const workflowUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`;
 
@@ -145,62 +146,3 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     if (!dispatchResponse.ok) {
       const errorText = await dispatchResponse.text();
-
-      jobs.get(jobId).status = "failed";
-
-      return res.status(dispatchResponse.status).json({
-        error: "Failed to start GitHub Actions",
-        details: errorText,
-        jobId
-      });
-    }
-
-    // إرجاع رقم العملية للتطبيق
-    return res.status(202).json({
-      jobId,
-      status: "building",
-      message: "Build started successfully"
-    });
-
-  } catch (error) {
-    console.error("BUILD ERROR:", error);
-
-    return res.status(500).json({
-      error: "Build server error",
-      details: error.message
-    });
-
-  } finally {
-    // حذف الملف المؤقت
-    if (filePath) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch (cleanupError) {
-        console.error(
-          "Cleanup error:",
-          cleanupError.message
-        );
-      }
-    }
-  }
-});
-
-// الاستعلام عن حالة البناء
-app.get("/api/build/:jobId", (req, res) => {
-  const job = jobs.get(req.params.jobId);
-
-  if (!job) {
-    return res.status(404).json({
-      error: "Job not found",
-      jobId: req.params.jobId
-    });
-  }
-
-  res.json(job);
-});
-
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `ZIPAPK Build Server running on port ${PORT}`
-  );
-});
