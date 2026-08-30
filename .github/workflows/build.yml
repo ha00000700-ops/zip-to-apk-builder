@@ -1,23 +1,23 @@
-name: Build APK
+name: Build Android APK
 
 on:
-  workflow_dispatch:
   push:
     branches: ["main", "master"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Build Android APK
+    name: Build & Package APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Set up JDK 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -26,17 +26,17 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Find ZIP file
+      - name: Find ZIP
         id: find_zip
         run: |
-          ZIP_FILE=$(find . -maxdepth 3 -type f -iname "*.zip" | head -n 1)
+          ZIP_FILE=$(find . -maxdepth 2 -type f -iname "*.zip" | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found."
+            echo "::error::No ZIP file found."
             exit 1
           fi
 
-          echo "ZIP found: $ZIP_FILE"
+          echo "Found ZIP: $ZIP_FILE"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Extract ZIP
@@ -47,38 +47,22 @@ jobs:
           unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
 
           echo "ZIP extracted successfully."
-          echo "Project files:"
           find extracted -maxdepth 4 -type f | sort | head -200
 
-      - name: Find Android project
+      - name: Find Android Project
         id: android_project
         run: |
-          PROJECT_DIR=""
-
           SETTINGS=$(find extracted -type f \( \
-            -name "settings.gradle" -o \
-            -name "settings.gradle.kts" \
+            -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \
           \) | head -n 1)
 
-          if [ -n "$SETTINGS" ]; then
-            PROJECT_DIR=$(dirname "$SETTINGS")
-          else
-            BUILD=$(find extracted -type f \( \
-              -name "build.gradle" -o \
-              -name "build.gradle.kts" \
-            \) | head -n 1)
-
-            if [ -n "$BUILD" ]; then
-              PROJECT_DIR=$(dirname "$BUILD")
-            fi
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android Gradle project was not found."
-            echo "Detected files:"
-            find extracted -maxdepth 6 -type f | sort | head -300
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::Android settings.gradle or settings.gradle.kts was not found."
             exit 1
           fi
+
+          PROJECT_DIR=$(dirname "$SETTINGS")
 
           echo "Android project found at: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
@@ -89,20 +73,16 @@ jobs:
           if [ -f "./gradlew" ]; then
             echo "Gradle Wrapper found."
           else
-            echo "Gradle Wrapper missing."
-            echo "Creating Gradle Wrapper..."
-
+            echo "Gradle Wrapper not found. Creating it..."
             gradle wrapper
 
             if [ ! -f "./gradlew" ]; then
-              echo "ERROR: Failed to create Gradle Wrapper."
+              echo "::error::Failed to create Gradle Wrapper."
               exit 1
             fi
           fi
 
           chmod +x ./gradlew
-
-          echo "Gradle Wrapper ready."
           ./gradlew --version
 
       - name: Build Debug APK
@@ -110,32 +90,27 @@ jobs:
         run: |
           ./gradlew assembleDebug --stacktrace
 
-      - name: Find APK
-        id: apk
+      - name: Locate & Verify APK
+        id: apk_path
         run: |
-          APK_FILE=$(find extracted -type f -name "*.apk" | head -n 1)
+          APK_FILE=$(find extracted -type f -path "*/build/outputs/apk/debug/*.apk" | head -n 1)
 
-          if [ -z "$APK_FILE" ]; then
-            echo "ERROR: APK was not produced."
-
-            echo "Searching build directories..."
-            find extracted -type d -name build -print
-
-            echo "Searching APK files..."
-            find extracted -type f | grep -i apk || true
-
+          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
+            echo "::error::No APK file was produced."
+            echo "Searching for APK files..."
+            find extracted -type f -name "*.apk" -print
             exit 1
           fi
 
-          echo "APK found:"
-          echo "$APK_FILE"
+          echo "Found real APK:"
+          ls -lh "$APK_FILE"
 
-          echo "apk_file=$APK_FILE" >> "$GITHUB_OUTPUT"
+          echo "apk_path=$APK_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK Artifact
+      - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
-          path: ${{ steps.apk.outputs.apk_file }}
+          path: ${{ steps.apk_path.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
