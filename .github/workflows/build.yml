@@ -45,7 +45,6 @@ jobs:
           unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
 
           echo "ZIP extracted successfully."
-          find extracted -maxdepth 4 -type f | sort | head -200
 
       - name: Find Android Project
         id: android_project
@@ -56,7 +55,7 @@ jobs:
           \) | head -n 1)
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::Android settings.gradle or settings.gradle.kts was not found."
+            echo "::error::Android project not found."
             exit 1
           fi
 
@@ -71,13 +70,7 @@ jobs:
           if [ -f "./gradlew" ]; then
             echo "Gradle Wrapper found."
           else
-            echo "Gradle Wrapper not found. Creating it..."
             gradle wrapper
-
-            if [ ! -f "./gradlew" ]; then
-              echo "::error::Failed to create Gradle Wrapper."
-              exit 1
-            fi
           fi
 
           chmod +x ./gradlew
@@ -97,35 +90,32 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          echo "Debug signing key created at:"
-          ls -lh "./debug.keystore"
-
       - name: Build Debug APK
         working-directory: ${{ steps.android_project.outputs.project_dir }}
         run: |
           ./gradlew assembleDebug --stacktrace
 
-      - name: Locate & Verify APK
+      - name: Locate APK
         id: apk_path
         run: |
           APK_FILE=$(find extracted -type f -path "*/build/outputs/apk/debug/*.apk" | head -n 1)
 
-          if [ -z "$APK_FILE" ] || [ ! -f "$APK_FILE" ]; then
-            echo "::error::No APK file was produced."
-            echo "Searching for APK files..."
+          if [ -z "$APK_FILE" ]; then
+            echo "::error::APK was not produced."
             find extracted -type f -name "*.apk" -print
             exit 1
           fi
 
-          echo "Found real APK:"
+          echo "APK found:"
           ls -lh "$APK_FILE"
 
           echo "apk_path=$APK_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Debug APK Artifact
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
           path: ${{ steps.apk_path.outputs.apk_path }}
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
