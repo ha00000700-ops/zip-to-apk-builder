@@ -28,17 +28,21 @@ function githubHeaders() {
   };
 }
 
+app.use(express.json());
+
 app.get("/", (req, res) => {
   res.json({
     ok: true,
-    service: "ZIPAPK Build Server"
+    service: "ZIPAPK Build Server",
+    status: "online"
   });
 });
 
 app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
-    server: "ZIPAPK"
+    server: "ZIPAPK",
+    status: "online"
   });
 });
 
@@ -69,18 +73,18 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       runId: null
     });
 
-    // Read ZIP
+    // قراءة ملف ZIP
     const zipBuffer = fs.readFileSync(filePath);
     const base64Zip = zipBuffer.toString("base64");
 
-    // Upload ZIP to repository
+    // اسم ملف ZIP داخل المستودع
     const zipPath = "zipapk-build.zip";
 
     const contentsUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${zipPath}`;
 
-    // Check whether the ZIP already exists
-    let sha;
+    // التحقق هل الملف موجود مسبقًا
+    let sha = null;
 
     const existing = await fetch(contentsUrl, {
       headers: githubHeaders()
@@ -91,6 +95,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       sha = existingData.sha;
     }
 
+    // تجهيز عملية رفع ZIP
     const uploadBody = {
       message: `Upload ZIP for build ${jobId}`,
       content: base64Zip
@@ -116,13 +121,13 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
       return res.status(uploadResponse.status).json({
         error: "GitHub ZIP upload failed",
-        details: uploadData.message
+        details: uploadData.message || "Unknown GitHub error"
       });
     }
 
     jobs.get(jobId).status = "building";
 
-    // Start GitHub Actions workflow
+    // تشغيل GitHub Actions
     const workflowUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`;
 
@@ -149,7 +154,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       });
     }
 
-    // Return the jobId expected by the Android application
+    // إرجاع jobId الذي ينتظره تطبيق Android
     return res.status(202).json({
       jobId,
       status: "building",
@@ -157,4 +162,42 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     });
 
   } catch (error) {
-   
+    console.error("BUILD ERROR:", error);
+
+    if (req.file) {
+      console.error("Uploaded file:", req.file.originalname);
+    }
+
+    return res.status(500).json({
+      error: "Build server error",
+      details: error.message
+    });
+
+  } finally {
+    // حذف الملف المؤقت من السيرفر
+    if (filePath) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch (cleanupError) {
+        console.error("Cleanup error:", cleanupError.message);
+      }
+    }
+  }
+});
+
+app.get("/api/build/:jobId", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+
+  if (!job) {
+    return res.status(404).json({
+      error: "Job not found",
+      jobId: req.params.jobId
+    });
+  }
+
+  res.json(job);
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`ZIPAPK Build Server running on port ${PORT}`);
+});
