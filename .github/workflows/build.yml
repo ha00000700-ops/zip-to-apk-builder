@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'al-noor-(النور).zip'
-      - '.github/workflows/build.yml'
+      - "*.zip"
+      - ".github/workflows/build.yml"
 
 jobs:
   build:
@@ -15,75 +15,107 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Java 17
+      - name: Setup JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "21"
 
-      - name: Setup Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v5
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '9.3.1'
+          gradle-version: "9.3.1"
 
-      - name: Extract Android project
+      - name: Find and extract ZIP
         run: |
+          ZIP_FILE="al-noor-(النور) (4).zip"
+
+          if [ ! -f "$ZIP_FILE" ]; then
+            echo "❌ ZIP file not found: $ZIP_FILE"
+            exit 1
+          fi
+
           mkdir -p extracted
-          unzip -q 'al-noor-(النور).zip' -d extracted
+          unzip -q "$ZIP_FILE" -d extracted
 
-      - name: Find Android project
+          echo "📁 Extracted files:"
+          find extracted -maxdepth 3 -type f | head -100
+
+      - name: Locate Android project
+        id: locate
         run: |
-          PROJECT_DIR=$(find extracted -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -printf '%h\n' | head -n 1)
+          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
+            -name "settings.gradle.kts" \
+            -o -name "settings.gradle" \
+            | head -1 \
+            | xargs -r dirname)
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "❌ لم يتم العثور على مشروع Android"
+            echo "❌ Android project not found."
+            find extracted -maxdepth 5 -type f
             exit 1
           fi
 
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "✅ Android project: $PROJECT_DIR"
+          echo "✅ Project found at:"
+          echo "$PROJECT_DIR"
 
-      - name: Create Gradle Wrapper
+      - name: Prepare debug keystore
         run: |
           cd "$PROJECT_DIR"
 
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version 9.3.1
+          if [ ! -f "$PROJECT_DIR/debug.keystore" ]; then
+            echo "🔐 Creating debug.keystore..."
+
+            keytool -genkeypair \
+              -v \
+              -keystore "$PROJECT_DIR/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA \
+              -keysize 2048 \
+              -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          else
+            echo "✅ debug.keystore already exists."
           fi
 
-          chmod +x gradlew
-
-      - name: Create debug keystore
+      - name: Verify Gradle wrapper
         run: |
           cd "$PROJECT_DIR"
 
-          keytool -genkeypair \
-            -v \
-            -keystore debug.keystore \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
+          if [ ! -f "./gradlew" ]; then
+            echo "⚠️ gradlew not found. Creating Gradle wrapper..."
 
-          echo "✅ debug.keystore created"
+            gradle wrapper --gradle-version 9.3.1
+
+            chmod +x ./gradlew
+          else
+            chmod +x ./gradlew
+          fi
+
+          ./gradlew --version
 
       - name: Build Release APK
         run: |
           cd "$PROJECT_DIR"
-          ./gradlew assembleRelease --stacktrace
+
+          echo "🚀 Building Release APK..."
+          ./gradlew assembleRelease --stacktrace --no-daemon
 
       - name: Find APK
         run: |
-          echo "📦 APK files:"
-          find "$PROJECT_DIR" -type f -name "*.apk" -print
+          echo "📦 Searching for APK..."
+
+          find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f \
+            -name "*.apk" \
+            -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Al-Noor-Release-APK
-          path: |
-            **/build/outputs/apk/release/*.apk
+          name: al-noor-release-apk
+          path: "**/app/build/outputs/apk/release/*.apk"
           if-no-files-found: error
