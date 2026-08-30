@@ -1,4 +1,4 @@
-namname: Build APK
+name: Build APK
 
 on:
   workflow_dispatch:
@@ -55,18 +55,18 @@ jobs:
         run: |
           PROJECT_DIR=""
 
-          SETTINGS=$(find extracted -type f \
+          SETTINGS=$(find extracted -type f \( \
             -name "settings.gradle" -o \
             -name "settings.gradle.kts" \
-          | head -n 1)
+          \) | head -n 1)
 
           if [ -n "$SETTINGS" ]; then
             PROJECT_DIR=$(dirname "$SETTINGS")
           else
-            BUILD=$(find extracted -type f \
+            BUILD=$(find extracted -type f \( \
               -name "build.gradle" -o \
               -name "build.gradle.kts" \
-            | head -n 1)
+            \) | head -n 1)
 
             if [ -n "$BUILD" ]; then
               PROJECT_DIR=$(dirname "$BUILD")
@@ -130,118 +130,9 @@ jobs:
           echo "APK found:"
           echo "$APK_FILE"
 
-         : Build APK
-
-on:
-  workflow_dispatch:
-  push:
-    branches: ["main", "master"]
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    name: Build APK from ZIP
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Find ZIP
-        id: find_zip
-        run: |
-          ZIP_FILE=$(find . -maxdepth 3 -type f -iname "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found."
-            exit 1
-          fi
-
-          echo "ZIP found: $ZIP_FILE"
-          echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
-
-      - name: Extract ZIP
-        run: |
-          rm -rf extracted
-          mkdir extracted
-          unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
-
-          echo "ZIP extracted successfully."
-          find extracted -maxdepth 3 -type f | head -100
-
-      - name: Find Android project
-        id: android_project
-        run: |
-          PROJECT_DIR=""
-
-          SETTINGS=$(find extracted -type f \( \
-            -name "settings.gradle" -o \
-            -name "settings.gradle.kts" \
-          \) | head -n 1)
-
-          if [ -n "$SETTINGS" ]; then
-            PROJECT_DIR=$(dirname "$SETTINGS")
-          else
-            BUILD=$(find extracted -type f \( \
-              -name "build.gradle" -o \
-              -name "build.gradle.kts" \
-            \) | head -n 1)
-
-            if [ -n "$BUILD" ]; then
-              PROJECT_DIR=$(dirname "$BUILD")
-            fi
-          fi
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "ERROR: Android Gradle project was not found."
-            echo "Detected files:"
-            find extracted -maxdepth 5 -type f | head -200
-            exit 1
-          fi
-
-          echo "Android project found at: $PROJECT_DIR"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Gradle
-        working-directory: ${{ steps.android_project.outputs.project_dir }}
-        run: |
-          if [ ! -f "./gradlew" ]; then
-            echo "ERROR: Gradle Wrapper (gradlew) was not found."
-            echo "Project files:"
-            find . -maxdepth 3 -type f | head -100
-            exit 1
-          fi
-
-          chmod +x ./gradlew
-
-      - name: Build Debug APK
-        working-directory: ${{ steps.android_project.outputs.project_dir }}
-        run: |
-          ./gradlew assembleDebug --stacktrace
-
-      - name: Find APK
-        id: apk
-        run: |
-          APK_FILE=$(find extracted -type f -name "*.apk" | head -n 1)
-
-          if [ -z "$APK_FILE" ]; then
-            echo "ERROR: APK was not produced."
-            find extracted -type f | grep -E "build|apk" | head -100 || true
-            exit 1
-          fi
-
-          echo "APK found: $APK_FILE"
           echo "apk_file=$APK_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: app-debug
