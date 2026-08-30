@@ -1,6 +1,7 @@
 import express from "express";
 import multer from "multer";
 import fs from "fs";
+import crypto from "crypto";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,14 +14,31 @@ const GITHUB_WORKFLOW = process.env.GITHUB_WORKFLOW || "build-apk.yml";
 const upload = multer({
   dest: "/tmp/uploads",
   limits: {
-    fileSize: 25 * 1024 * 1024
+    fileSize: 100 * 1024 * 1024
   }
 });
+
+const jobs = new Map();
+
+function githubHeaders() {
+  return {
+    Authorization: `Bearer ${GITHUB_TOKEN}`,
+    Accept: "application/vnd.github+json",
+    "X-GitHub-Api-Version": "2022-11-28"
+  };
+}
 
 app.get("/", (req, res) => {
   res.json({
     ok: true,
     service: "ZIPAPK Build Server"
+  });
+});
+
+app.get("/api/health", (req, res) => {
+  res.json({
+    ok: true,
+    server: "ZIPAPK"
   });
 });
 
@@ -42,69 +60,76 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     filePath = req.file.path;
 
+    const jobId = crypto.randomUUID();
+
+    jobs.set(jobId, {
+      jobId,
+      status: "queued",
+      createdAt: Date.now(),
+      runId: null
+    });
+
+    // Read ZIP
     const zipBuffer = fs.readFileSync(filePath);
     const base64Zip = zipBuffer.toString("base64");
 
-    const uploadUrl =
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/zipapk-build.zip`;
+    // Upload ZIP to repository
+    const zipPath = "zipapk-build.zip";
 
-    const uploadResponse = await fetch(uploadUrl, {
+    const contentsUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${zipPath}`;
+
+    // Check whether the ZIP already exists
+    let sha;
+
+    const existing = await fetch(contentsUrl, {
+      headers: githubHeaders()
+    });
+
+    if (existing.ok) {
+      const existingData = await existing.json();
+      sha = existingData.sha;
+    }
+
+    const uploadBody = {
+      message: `Upload ZIP for build ${jobId}`,
+      content: base64Zip
+    };
+
+    if (sha) {
+      uploadBody.sha = sha;
+    }
+
+    const uploadResponse = await fetch(contentsUrl, {
       method: "PUT",
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        ...githubHeaders(),
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        message: "Upload ZIP for APK build",
-        content: base64Zip
-      })
+      body: JSON.stringify(uploadBody)
     });
 
     const uploadData = await uploadResponse.json();
 
     if (!uploadResponse.ok) {
+      jobs.delete(jobId);
+
       return res.status(uploadResponse.status).json({
-        error: "GitHub upload failed",
+        error: "GitHub ZIP upload failed",
         details: uploadData.message
       });
     }
 
-    const workflowsUrl =
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows`;
+    jobs.get(jobId).status = "building";
 
-    const workflowsResponse = await fetch(workflowsUrl, {
-      headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28"
-      }
-    });
+    // Start GitHub Actions workflow
+    const workflowUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${GITHUB_WORKFLOW}/dispatches`;
 
-    const workflowsData = await workflowsResponse.json();
-
-    const workflow = workflowsData.workflows?.find(
-      w =>
-        w.path === `.github/workflows/${GITHUB_WORKFLOW}` ||
-        w.name === "Build Android APK"
-    );
-
-    if (!workflow) {
-      return res.status(404).json({
-        error: "Build workflow not found"
-      });
-    }
-
-    const dispatchUrl =
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${workflow.id}/dispatches`;
-
-    const dispatchResponse = await fetch(dispatchUrl, {
+    const dispatchResponse = await fetch(workflowUrl, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
+        ...githubHeaders(),
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -115,41 +140,21 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     if (!dispatchResponse.ok) {
       const errorText = await dispatchResponse.text();
 
+      jobs.get(jobId).status = "failed";
+
       return res.status(dispatchResponse.status).json({
         error: "Failed to start GitHub Actions",
-        details: errorText
+        details: errorText,
+        jobId
       });
     }
 
-    res.json({
-      success: true,
+    // Return the jobId expected by the Android application
+    return res.status(202).json({
+      jobId,
+      status: "building",
       message: "Build started successfully"
     });
 
   } catch (error) {
-    console.error(error);
-
-    res.status(500).json({
-      error: "Build server error",
-      details: error.message
-    });
-
-  } finally {
-    if (filePath) {
-      try {
-        fs.unlinkSync(filePath);
-      } catch {}
-    }
-  }
-});
-
-app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    server: "ZIPAPK"
-  });
-});
-
-app.listen(PORT, () => {
-  console.log(`ZIPAPK Build Server running on port ${PORT}`);
-});
+   
