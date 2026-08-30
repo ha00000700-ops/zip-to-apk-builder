@@ -1,121 +1,51 @@
-name: Build Al-Noor APK
+name: Build APK
 
 on:
   workflow_dispatch:
   push:
-    paths:
-      - "*.zip"
-      - ".github/workflows/build.yml"
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Setup JDK 21
+      - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "17"
+          cache: gradle
+
+      - name: Grant Execute Permission
+        run: chmod +x ./gradlew
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.3.1"
 
-      - name: Find and extract ZIP
-        run: |
-          ZIP_FILE="al-noor-(النور) (4).zip"
-
-          if [ ! -f "$ZIP_FILE" ]; then
-            echo "❌ ZIP file not found: $ZIP_FILE"
-            exit 1
-          fi
-
-          mkdir -p extracted
-          unzip -q "$ZIP_FILE" -d extracted
-
-          echo "📁 Extracted files:"
-          find extracted -maxdepth 3 -type f | head -100
-
-      - name: Locate Android project
-        id: locate
-        run: |
-          PROJECT_DIR=$(find "$GITHUB_WORKSPACE/extracted" \
-            -name "settings.gradle.kts" \
-            -o -name "settings.gradle" \
-            | head -1 \
-            | xargs -r dirname)
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "❌ Android project not found."
-            find extracted -maxdepth 5 -type f
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "✅ Project found at:"
-          echo "$PROJECT_DIR"
-
-      - name: Prepare debug keystore
-        run: |
-          cd "$PROJECT_DIR"
-
-          if [ ! -f "$PROJECT_DIR/debug.keystore" ]; then
-            echo "🔐 Creating debug.keystore..."
-
-            keytool -genkeypair \
-              -v \
-              -keystore "$PROJECT_DIR/debug.keystore" \
-              -storepass android \
-              -alias androiddebugkey \
-              -keypass android \
-              -keyalg RSA \
-              -keysize 2048 \
-              -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
-          else
-            echo "✅ debug.keystore already exists."
-          fi
-
-      - name: Verify Gradle wrapper
-        run: |
-          cd "$PROJECT_DIR"
-
-          if [ ! -f "./gradlew" ]; then
-            echo "⚠️ gradlew not found. Creating Gradle wrapper..."
-
-            gradle wrapper --gradle-version 9.3.1
-
-            chmod +x ./gradlew
-          else
-            chmod +x ./gradlew
-          fi
-
-          ./gradlew --version
-
-      - name: Build Release APK
-        run: |
-          cd "$PROJECT_DIR"
-
-          echo "🚀 Building Release APK..."
-          ./gradlew assembleRelease --stacktrace --no-daemon
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
 
       - name: Find APK
         run: |
-          echo "📦 Searching for APK..."
-
-          find "$PROJECT_DIR/app/build/outputs/apk" \
-            -type f \
-            -name "*.apk" \
-            -print
+          APK_FILE=$(find . -type f -name "*.apk" | head -n 1)
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: No APK was produced."
+            exit 1
+          fi
+          echo "APK found: $APK_FILE"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: al-noor-release-apk
-          path: "**/app/build/outputs/apk/release/*.apk"
+          name: app-debug
+          path: "**/build/outputs/apk/**/*.apk"
           if-no-files-found: error
+          retention-days: 14
