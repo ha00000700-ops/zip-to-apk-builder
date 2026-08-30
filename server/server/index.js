@@ -1,7 +1,10 @@
 import express from "express";
 import multer from "multer";
 import fs from "fs";
+import path from "path";
 import crypto from "crypto";
+import os from "os";
+import unzipper from "unzipper";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -29,14 +32,25 @@ function githubHeaders() {
   };
 }
 
+function getPublicBaseUrl(req) {
+  const forwardedProto = req.headers["x-forwarded-proto"];
+  const protocol = forwardedProto
+    ? String(forwardedProto).split(",")[0]
+    : req.protocol;
+
+  const host = req.get("host");
+
+  return `${protocol}://${host}`;
+}
+
 /* -------------------------------- */
-/* Middleware                        */
+/* Middleware                       */
 /* -------------------------------- */
 
 app.use(express.json());
 
 /* -------------------------------- */
-/* Health                            */
+/* Health                           */
 /* -------------------------------- */
 
 app.get("/", (req, res) => {
@@ -56,7 +70,7 @@ app.get("/api/health", (req, res) => {
 });
 
 /* -------------------------------- */
-/* Start Build                       */
+/* Start Build                      */
 /* -------------------------------- */
 
 app.post("/api/build", upload.single("zip"), async (req, res) => {
@@ -217,22 +231,21 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
         if (runsResponse.ok) {
           const runsData = await runsResponse.json();
 
-          const possibleRuns =
-            (runsData.workflow_runs || [])
-              .filter(r => {
-                const created =
-                  new Date(r.created_at).getTime();
+          const possibleRuns = (runsData.workflow_runs || [])
+            .filter(r => {
+              const created =
+                new Date(r.created_at).getTime();
 
-                return (
-                  created >= dispatchTime - 10000 &&
-                  r.event === "workflow_dispatch"
-                );
-              })
-              .sort(
-                (a, b) =>
-                  new Date(b.created_at).getTime() -
-                  new Date(a.created_at).getTime()
+              return (
+                created >= dispatchTime - 10000 &&
+                r.event === "workflow_dispatch"
               );
+            })
+            .sort(
+              (a, b) =>
+                new Date(b.created_at).getTime() -
+                new Date(a.created_at).getTime()
+            );
 
           if (possibleRuns.length > 0) {
             run = possibleRuns[0];
@@ -297,7 +310,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 });
 
 /* -------------------------------- */
-/* Get Build Status                  */
+/* Get Build Status                 */
 /* -------------------------------- */
 
 app.get("/api/build/:jobId", async (req, res) => {
@@ -318,15 +331,16 @@ app.get("/api/build/:jobId", async (req, res) => {
         stage: job.stage,
         stageName: job.stageName,
         runId: null,
-        apkAvailable: false,
+        apkUrl: null,
         downloadUrl: null,
         artifactUrl: null,
+        apkAvailable: false,
         error: job.error
       });
     }
 
     /* -------------------------------- */
-    /* Get GitHub Run                   */
+    /* Get GitHub Run                  */
     /* -------------------------------- */
 
     const runUrl =
@@ -343,9 +357,10 @@ app.get("/api/build/:jobId", async (req, res) => {
         stage: job.stage,
         stageName: job.stageName,
         runId: job.runId,
-        apkAvailable: false,
+        apkUrl: null,
         downloadUrl: null,
         artifactUrl: job.artifactUrl,
+        apkAvailable: false,
         error: job.error
       });
     }
@@ -353,7 +368,7 @@ app.get("/api/build/:jobId", async (req, res) => {
     const run = await runResponse.json();
 
     /* -------------------------------- */
-    /* Still Building                   */
+    /* Still Building                  */
     /* -------------------------------- */
 
     if (run.status !== "completed") {
@@ -400,7 +415,6 @@ app.get("/api/build/:jobId", async (req, res) => {
               ) {
                 job.stage = 2;
                 job.stageName = "رفع المشروع";
-
               } else if (
                 name.includes("android project") ||
                 name.includes("gradle wrapper") ||
@@ -408,13 +422,11 @@ app.get("/api/build/:jobId", async (req, res) => {
               ) {
                 job.stage = 3;
                 job.stageName = "تحضير Android";
-
               } else if (
                 name.includes("setup gradle")
               ) {
                 job.stage = 4;
                 job.stageName = "تشغيل Gradle";
-
               } else if (
                 name.includes("build debug apk")
               ) {
@@ -442,15 +454,16 @@ app.get("/api/build/:jobId", async (req, res) => {
         stage: job.stage,
         stageName: job.stageName,
         runId: job.runId,
-        apkAvailable: false,
+        apkUrl: null,
         downloadUrl: null,
         artifactUrl: null,
+        apkAvailable: false,
         error: null
       });
     }
 
     /* -------------------------------- */
-    /* Build Failed                     */
+    /* Build Failed                    */
     /* -------------------------------- */
 
     if (run.conclusion !== "success") {
@@ -467,23 +480,24 @@ app.get("/api/build/:jobId", async (req, res) => {
         stage: job.stage,
         stageName: job.stageName,
         runId: job.runId,
-        apkAvailable: false,
+        apkUrl: null,
         downloadUrl: null,
         artifactUrl: null,
+        apkAvailable: false,
         error: job.error
       });
     }
 
     /* -------------------------------- */
-    /* Build Successful                 */
+    /* Build Successful                */
     /* -------------------------------- */
 
-    job.status = "success";
+    job.status = "completed";
     job.stage = 6;
     job.stageName = "اكتمل";
 
     /* -------------------------------- */
-    /* Find APK Artifact                */
+    /* Find Artifact                   */
     /* -------------------------------- */
 
     const artifactsUrl =
@@ -494,35 +508,59 @@ app.get("/api/build/:jobId", async (req, res) => {
         headers: githubHeaders()
       });
 
-    if (artifactsResponse.ok) {
-      const artifactsData =
-        await artifactsResponse.json();
-
-      const artifact =
-        (artifactsData.artifacts || [])
-          .find(
-            a =>
-              a.name === "app-debug" &&
-              !a.expired
-          );
-
-      if (artifact) {
-        job.artifactUrl =
-          artifact.archive_download_url;
-
-        /*
-         * مهم جداً:
-         * لا نرسل رابط GitHub مباشرة للتطبيق.
-         * نرسل رابط السيرفر الخاص بنا.
-         */
-        job.apkUrl =
-          `/api/build/${job.jobId}/download`;
-      }
+    if (!artifactsResponse.ok) {
+      return res.status(500).json({
+        jobId: job.jobId,
+        status: "failed",
+        stage: 6,
+        stageName: "اكتمل",
+        runId: job.runId,
+        apkUrl: null,
+        downloadUrl: null,
+        artifactUrl: null,
+        apkAvailable: false,
+        error: "Unable to read GitHub artifact"
+      });
     }
 
-    const downloadUrl = job.apkUrl
-      ? `${getPublicBaseUrl(req)}${job.apkUrl}`
-      : null;
+    const artifactsData =
+      await artifactsResponse.json();
+
+    const artifact =
+      (artifactsData.artifacts || [])
+        .find(
+          a =>
+            a.name === "app-debug" &&
+            !a.expired
+        );
+
+    if (!artifact) {
+      return res.json({
+        jobId: job.jobId,
+        status: "failed",
+        stage: 6,
+        stageName: "اكتمل لكن APK غير موجود",
+        runId: job.runId,
+        apkUrl: null,
+        downloadUrl: null,
+        artifactUrl: null,
+        apkAvailable: false,
+        error: "APK artifact was not found"
+      });
+    }
+
+    job.artifactUrl =
+      artifact.archive_download_url;
+
+    /* -------------------------------- */
+    /* IMPORTANT: Direct APK URL       */
+    /* -------------------------------- */
+
+    const publicBaseUrl =
+      getPublicBaseUrl(req);
+
+    job.apkUrl =
+      `${publicBaseUrl}/api/build/${job.jobId}/apk`;
 
     return res.json({
       jobId: job.jobId,
@@ -531,17 +569,14 @@ app.get("/api/build/:jobId", async (req, res) => {
       stageName: "اكتمل",
       runId: job.runId,
 
-      /*
-       * هذه الأسماء هي التي ينتظرها التطبيق.
-       */
-      apkAvailable: Boolean(job.artifactUrl),
-      downloadUrl: downloadUrl,
+      /* Direct APK URL for Android app */
+      apkUrl: job.apkUrl,
+      downloadUrl: job.apkUrl,
 
-      /*
-       * نترك artifactUrl أيضاً للمعلومات الداخلية.
-       */
+      /* Kept for debugging */
       artifactUrl: job.artifactUrl,
 
+      apkAvailable: true,
       error: null
     });
 
@@ -559,164 +594,12 @@ app.get("/api/build/:jobId", async (req, res) => {
 });
 
 /* -------------------------------- */
-/* Download APK                      */
+/* DIRECT APK DOWNLOAD              */
 /* -------------------------------- */
 
-app.get("/api/build/:jobId/download", async (req, res) => {
-  try {
-    const job = jobs.get(req.params.jobId);
+app.get("/api/build/:jobId/apk", async (req, res) => {
+  let tempDir = null;
 
-    if (!job) {
-      return res.status(404).json({
-        error: "Job not found"
-      });
-    }
-
-    if (!job.artifactUrl) {
-      return res.status(404).json({
-        error: "APK artifact is not available yet"
-      });
-    }
-
-    if (!GITHUB_TOKEN) {
-      return res.status(500).json({
-        error: "GitHub token is not configured"
-      });
-    }
-
-    /*
-     * تحميل Artifact من GitHub باستخدام Token
-     */
-    const artifactResponse =
-      await fetch(job.artifactUrl, {
-        headers: {
-          ...githubHeaders(),
-          Accept:
-            "application/vnd.github+json"
-        },
-        redirect: "manual"
-      });
-
-    /*
-     * GitHub قد يرجع Redirect إلى رابط التحميل الحقيقي.
-     */
-    if (
-      artifactResponse.status >= 300 &&
-      artifactResponse.status < 400
-    ) {
-      const redirectUrl =
-        artifactResponse.headers.get("location");
-
-      if (!redirectUrl) {
-        return res.status(502).json({
-          error:
-            "GitHub did not provide download location"
-        });
-      }
-
-      const fileResponse =
-        await fetch(redirectUrl);
-
-      if (!fileResponse.ok) {
-        return res.status(502).json({
-          error:
-            "Failed to download APK artifact from GitHub"
-        });
-      }
-
-      res.setHeader(
-        "Content-Type",
-        "application/zip"
-      );
-
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${safeFileName(job.jobId)}.zip"`
-      );
-
-      if (fileResponse.body) {
-        return fileResponse.body.pipeTo(
-          new WritableStream({
-            write(chunk) {
-              res.write(Buffer.from(chunk));
-            },
-            close() {
-              res.end();
-            },
-            abort(error) {
-              console.error(
-                "Download stream error:",
-                error
-              );
-              res.end();
-            }
-          })
-        );
-      }
-    }
-
-    /*
-     * بعض استجابات GitHub قد تعطي الملف مباشرة.
-     */
-    if (artifactResponse.ok) {
-      res.setHeader(
-        "Content-Type",
-        artifactResponse.headers.get(
-          "content-type"
-        ) || "application/zip"
-      );
-
-      res.setHeader(
-        "Content-Disposition",
-        `attachment; filename="${safeFileName(job.jobId)}.zip"`
-      );
-
-      if (artifactResponse.body) {
-        return artifactResponse.body.pipeTo(
-          new WritableStream({
-            write(chunk) {
-              res.write(Buffer.from(chunk));
-            },
-            close() {
-              res.end();
-            },
-            abort(error) {
-              console.error(
-                "Download stream error:",
-                error
-              );
-              res.end();
-            }
-          })
-        );
-      }
-    }
-
-    return res.status(502).json({
-      error:
-        "Unable to download APK artifact"
-    });
-
-  } catch (error) {
-    console.error(
-      "DOWNLOAD ERROR:",
-      error
-    );
-
-    if (!res.headersSent) {
-      return res.status(500).json({
-        error: "APK download failed",
-        details: error.message
-      });
-    }
-  }
-});
-
-/* -------------------------------- */
-/* Workflow Run Info                */
-/* -------------------------------- */
-
-app.get("/api/build/:jobId/run", async (req, res) => {
   try {
     const job = jobs.get(req.params.jobId);
 
@@ -727,71 +610,337 @@ app.get("/api/build/:jobId/run", async (req, res) => {
     }
 
     if (!job.runId) {
-      return res.json({
-        runId: null
+      return res.status(400).json({
+        error: "Build is not completed yet"
       });
     }
 
-    const runUrl =
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}`;
+    if (!GITHUB_TOKEN || !GITHUB_OWNER) {
+      return res.status(500).json({
+        error: "GitHub configuration is missing"
+      });
+    }
 
-    const response = await fetch(runUrl, {
-      headers: githubHeaders()
-    });
+    /* -------------------------------- */
+    /* Find Artifact                   */
+    /* -------------------------------- */
 
-    const data = await response.json();
+    const artifactsUrl =
+      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}/artifacts`;
 
-    return res.json({
-      runId: job.runId,
-      status: data.status,
-      conclusion: data.conclusion,
-      htmlUrl: data.html_url
-    });
+    const artifactsResponse =
+      await fetch(artifactsUrl, {
+        headers: githubHeaders()
+      });
+
+    if (!artifactsResponse.ok) {
+      return res.status(502).json({
+        error: "Unable to access GitHub artifacts"
+      });
+    }
+
+    const artifactsData =
+      await artifactsResponse.json();
+
+    const artifact =
+      (artifactsData.artifacts || [])
+        .find(
+          a =>
+            a.name === "app-debug" &&
+            !a.expired
+        );
+
+    if (!artifact) {
+      return res.status(404).json({
+        error: "APK artifact not found"
+      });
+    }
+
+    /* -------------------------------- */
+    /* Download Artifact ZIP            */
+    /* -------------------------------- */
+
+    const artifactResponse =
+      await fetch(
+        artifact.archive_download_url,
+        {
+          headers: {
+            ...githubHeaders(),
+            Accept:
+              "application/vnd.github+json"
+          },
+          redirect: "follow"
+        }
+      );
+
+    if (!artifactResponse.ok) {
+      return res.status(502).json({
+        error: "Failed to download APK artifact"
+      });
+    }
+
+    const artifactBuffer =
+      Buffer.from(
+        await artifactResponse.arrayBuffer()
+      );
+
+    /* -------------------------------- */
+    /* Temporary directory              */
+    /* -------------------------------- */
+
+    tempDir = await fs.promises.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        "zipapk-"
+      )
+    );
+
+    const artifactZipPath =
+      path.join(
+        tempDir,
+        "artifact.zip"
+      );
+
+    await fs.promises.writeFile(
+      artifactZipPath,
+      artifactBuffer
+    );
+
+    /* -------------------------------- */
+    /* Extract APK                     */
+    /* -------------------------------- */
+
+    const directory =
+      await unzipper.Open.file(
+        artifactZipPath
+      );
+
+    const apkEntry =
+      directory.files.find(
+        file =>
+          file.type === "File" &&
+          file.path.toLowerCase().endsWith(".apk")
+      );
+
+    if (!apkEntry) {
+      return res.status(404).json({
+        error: "APK file was not found inside artifact"
+      });
+    }
+
+    const safeAppName =
+      String(job.appName || "app")
+        .replace(
+          /[^a-zA-Z0-9._-]/g,
+          "_"
+        );
+
+    const apkFilename =
+      `${safeAppName}.apk`;
+
+    /* -------------------------------- */
+    /* Send APK directly               */
+    /* -------------------------------- */
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.android.package-archive"
+    );
+
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${apkFilename}"`
+    );
+
+    res.setHeader(
+      "Cache-Control",
+      "public, max-age=3600"
+    );
+
+    const apkStream =
+      apkEntry.stream();
+
+    apkStream.on(
+      "error",
+      error => {
+        console.error(
+          "APK stream error:",
+          error
+        );
+
+        if (!res.headersSent) {
+          res.status(500).json({
+            error: "APK streaming failed"
+          });
+        } else {
+          res.destroy(error);
+        }
+      }
+    );
+
+    apkStream.pipe(res);
+
+    apkStream.on(
+      "end",
+      async () => {
+        if (tempDir) {
+          try {
+            await fs.promises.rm(
+              tempDir,
+              {
+                recursive: true,
+                force: true
+              }
+            );
+          } catch {}
+        }
+      }
+    );
 
   } catch (error) {
-    return res.status(500).json({
-      error: error.message
-    });
+    console.error(
+      "APK DOWNLOAD ERROR:",
+      error
+    );
+
+    if (!res.headersSent) {
+      return res.status(500).json({
+        error: "Failed to prepare APK download",
+        details: error.message
+      });
+    }
+
+    res.destroy(error);
+
   }
 });
 
 /* -------------------------------- */
-/* Helpers                           */
+/* GitHub Run Information           */
+/* -------------------------------- */
+
+app.get(
+  "/api/build/:jobId/run",
+  async (req, res) => {
+    try {
+      const job =
+        jobs.get(req.params.jobId);
+
+      if (!job) {
+        return res.status(404).json({
+          error: "Job not found"
+        });
+      }
+
+      if (!job.runId) {
+        return res.json({
+          runId: null
+        });
+      }
+
+      const runUrl =
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}`;
+
+      const response =
+        await fetch(runUrl, {
+          headers: githubHeaders()
+        });
+
+      const data =
+        await response.json();
+
+      return res.json({
+        runId: job.runId,
+        status: data.status,
+        conclusion: data.conclusion,
+        htmlUrl: data.html_url
+      });
+
+    } catch (error) {
+      return res.status(500).json({
+        error: error.message
+      });
+    }
+  }
+);
+
+/* -------------------------------- */
+/* Cancel Build                     */
+/* -------------------------------- */
+
+app.delete(
+  "/api/build/:jobId",
+  async (req, res) => {
+    try {
+      const job =
+        jobs.get(req.params.jobId);
+
+      if (!job) {
+        return res.status(404).json({
+          error: "Job not found"
+        });
+      }
+
+      if (!job.runId) {
+        job.status = "cancelled";
+
+        return res.json({
+          ok: true,
+          status: "cancelled"
+        });
+      }
+
+      const cancelUrl =
+        `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/runs/${job.runId}/cancel`;
+
+      const response =
+        await fetch(cancelUrl, {
+          method: "POST",
+          headers: githubHeaders()
+        });
+
+      if (!response.ok) {
+        return res.status(response.status).json({
+          error: "Failed to cancel GitHub build"
+        });
+      }
+
+      job.status = "cancelled";
+      job.stageName = "ملغي";
+
+      return res.json({
+        ok: true,
+        status: "cancelled"
+      });
+
+    } catch (error) {
+      return res.status(500).json({
+        error: error.message
+      });
+    }
+  }
+);
+
+/* -------------------------------- */
+/* Helper                           */
 /* -------------------------------- */
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
   );
-}
-
-function safeFileName(jobId) {
-  return `app-${jobId}.zip`;
-}
-
-function getPublicBaseUrl(req) {
-  /*
-   * إذا كان السيرفر خلف Proxy مثل Render/Railway،
-   * استخدم X-Forwarded-Proto مع host.
-   */
-  const protocol =
-    req.headers["x-forwarded-proto"] ||
-    req.protocol ||
-    "https";
-
-  const host =
-    req.headers["x-forwarded-host"] ||
-    req.get("host");
-
-  return `${protocol}://${host}`;
 }
 
 /* -------------------------------- */
 /* Start Server                     */
 /* -------------------------------- */
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    `ZIPAPK Build Server running on port ${PORT}`
-  );
-});
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+    console.log(
+      `ZIPAPK Build Server running on port ${PORT}`
+    );
+  }
+);
