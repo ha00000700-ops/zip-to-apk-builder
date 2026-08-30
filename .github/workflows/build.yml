@@ -5,6 +5,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   build:
@@ -119,3 +120,39 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      # -----------------------------------------
+      # تنظيف تشغيلات GitHub Actions القديمة
+      # يحتفظ بآخر 5 تشغيلات فقط
+      # -----------------------------------------
+
+      - name: Cleanup Old Workflow Runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Checking old workflow runs..."
+
+          RUNS=$(gh api \
+            --paginate \
+            "/repos/${{ github.repository }}/actions/workflows/${{ github.workflow_id }}/runs?per_page=100" \
+            --jq '.workflow_runs[] | [.id, .created_at] | @tsv' \
+            | sort -k2 -r)
+
+          COUNT=0
+
+          while IFS=$'\t' read -r RUN_ID CREATED_AT; do
+            COUNT=$((COUNT + 1))
+
+            if [ "$COUNT" -le 5 ]; then
+              echo "Keeping run: $RUN_ID ($CREATED_AT)"
+            else
+              echo "Deleting old run: $RUN_ID ($CREATED_AT)"
+
+              gh api \
+                --method DELETE \
+                "/repos/${{ github.repository }}/actions/runs/$RUN_ID" \
+                || echo "Could not delete run $RUN_ID"
+            fi
+          done <<< "$RUNS"
+
+          echo "Cleanup completed."
