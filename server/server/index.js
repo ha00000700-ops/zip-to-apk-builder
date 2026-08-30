@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 3000;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
 const GITHUB_REPO = process.env.GITHUB_REPO || "zip-to-apk-builder";
-const GITHUB_WORKFLOW = process.env.GITHUB_WORKFLOW || "build-apk.yml";
+const GITHUB_WORKFLOW = process.env.GITHUB_WORKFLOW || "build.yml";
 
 const upload = multer({
   dest: "/tmp/uploads",
@@ -70,20 +70,21 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       jobId,
       status: "queued",
       createdAt: Date.now(),
-      runId: null
+      runId: null,
+      apkUrl: null
     });
 
-    // قراءة ملف ZIP
+    // قراءة ZIP
     const zipBuffer = fs.readFileSync(filePath);
     const base64Zip = zipBuffer.toString("base64");
 
-    // اسم ملف ZIP داخل المستودع
+    // اسم ZIP داخل GitHub
     const zipPath = "zipapk-build.zip";
 
     const contentsUrl =
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${zipPath}`;
 
-    // التحقق هل الملف موجود مسبقًا
+    // التحقق من وجود ZIP سابق
     let sha = null;
 
     const existing = await fetch(contentsUrl, {
@@ -95,7 +96,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       sha = existingData.sha;
     }
 
-    // تجهيز عملية رفع ZIP
     const uploadBody = {
       message: `Upload ZIP for build ${jobId}`,
       content: base64Zip
@@ -105,6 +105,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       uploadBody.sha = sha;
     }
 
+    // رفع ZIP إلى GitHub
     const uploadResponse = await fetch(contentsUrl, {
       method: "PUT",
       headers: {
@@ -154,7 +155,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       });
     }
 
-    // إرجاع jobId الذي ينتظره تطبيق Android
+    // إرجاع رقم العملية للتطبيق
     return res.status(202).json({
       jobId,
       status: "building",
@@ -164,27 +165,27 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
   } catch (error) {
     console.error("BUILD ERROR:", error);
 
-    if (req.file) {
-      console.error("Uploaded file:", req.file.originalname);
-    }
-
     return res.status(500).json({
       error: "Build server error",
       details: error.message
     });
 
   } finally {
-    // حذف الملف المؤقت من السيرفر
+    // حذف الملف المؤقت
     if (filePath) {
       try {
         fs.unlinkSync(filePath);
       } catch (cleanupError) {
-        console.error("Cleanup error:", cleanupError.message);
+        console.error(
+          "Cleanup error:",
+          cleanupError.message
+        );
       }
     }
   }
 });
 
+// الاستعلام عن حالة البناء
 app.get("/api/build/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
 
@@ -199,5 +200,7 @@ app.get("/api/build/:jobId", (req, res) => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`ZIPAPK Build Server running on port ${PORT}`);
+  console.log(
+    `ZIPAPK Build Server running on port ${PORT}`
+  );
 });
